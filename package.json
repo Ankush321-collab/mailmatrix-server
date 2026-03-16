@@ -1,0 +1,20 @@
+{
+  "name": "mailservice",
+  "version": "1.0.0",
+  "description": "Local SMTP mail catcher service that stores incoming messages on disk",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "echo \"No tests configured\""
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "mailparser": "^3.9.4",
+    "smtp-server": "^3.18.1"
+  },
+  "devDependencies": {
+    "@types/smtp-server": "^3.5.12"
+  }
+}
