@@ -106,6 +106,79 @@ async function saveAttachments(attachments, attachmentDir) {
   return savedAttachments;
 }
 
+async function listMessages(storageDir) {
+  try {
+    const entries = await fsPromises.readdir(storageDir, { withFileTypes: true });
+    const messages = [];
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      const metadataPath = path.join(storageDir, entry.name, "message.json");
+
+      try {
+        const content = await fsPromises.readFile(metadataPath, "utf8");
+        const metadata = JSON.parse(content);
+
+        messages.push({
+          id: metadata.id,
+          receivedAt: metadata.receivedAt,
+          from: metadata.from,
+          to: metadata.to,
+          subject: metadata.subject,
+          attachmentCount: metadata.attachments ? metadata.attachments.length : 0
+        });
+      } catch {
+        // Skip directories without a valid message.json
+      }
+    }
+
+    return messages.sort((a, b) => new Date(b.receivedAt) - new Date(a.receivedAt));
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return [];
+    }
+
+    throw error;
+  }
+}
+
+async function getMessageMetadata(storageDir, id) {
+  const metadataPath = path.join(storageDir, id, "message.json");
+
+  try {
+    const content = await fsPromises.readFile(metadataPath, "utf8");
+    return JSON.parse(content);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function deleteMessage(storageDir, id) {
+  const messageDir = path.join(storageDir, id);
+
+  try {
+    await fsPromises.rm(messageDir, { recursive: true });
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+function isValidMessageId(id) {
+  return /^[a-zA-Z0-9-]+$/.test(id);
+}
+
 async function saveMessage(rawMessage, parsedMessage, session, config) {
   const messageId = buildMessageId();
   const messageDir = path.join(config.storageDir, messageId);
@@ -233,32 +306,128 @@ const server = new SMTPServer({
   }
 });
 
-const statusServer = http.createServer((request, response) => {
-  if (request.url !== "/" && request.url !== "/health") {
-    response.writeHead(404, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ error: "Not found" }));
+async function handleRequest(request, response) {
+  const parsedUrl = new URL(request.url, "http://localhost");
+  const pathname = parsedUrl.pathname;
+  const method = request.method;
+
+  if ((pathname === "/" || pathname === "/health") && method === "GET") {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(
+      JSON.stringify(
+        {
+          service: "mailservice",
+          status: "ok",
+          smtp: {
+            host: config.smtpHost,
+            port: config.smtpPort,
+            authRequired: config.requireAuth,
+            maxSizeBytes: config.maxSizeBytes
+          },
+          storageDir: config.storageDir,
+          metrics: state
+        },
+        null,
+        2
+      )
+    );
     return;
   }
 
-  response.writeHead(200, { "Content-Type": "application/json" });
-  response.end(
-    JSON.stringify(
-      {
-        service: "mailservice",
-        status: "ok",
-        smtp: {
-          host: config.smtpHost,
-          port: config.smtpPort,
-          authRequired: config.requireAuth,
-          maxSizeBytes: config.maxSizeBytes
-        },
-        storageDir: config.storageDir,
-        metrics: state
-      },
-      null,
-      2
-    )
-  );
+  if (pathname === "/messages" && method === "GET") {
+    const messages = await listMessages(config.storageDir);
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ messages }, null, 2));
+    return;
+  }
+
+  const singleMessageMatch = pathname.match(/^\/messages\/([^/]+)$/);
+
+  if (singleMessageMatch) {
+    const id = singleMessageMatch[1];
+
+    if (!isValidMessageId(id)) {
+      response.writeHead(400, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: "Invalid message ID" }));
+      return;
+    }
+
+    if (method === "GET") {
+      const metadata = await getMessageMetadata(config.storageDir, id);
+
+      if (!metadata) {
+        response.writeHead(404, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: "Message not found" }));
+        return;
+      }
+
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(metadata, null, 2));
+      return;
+    }
+
+    if (method === "DELETE") {
+      const deleted = await deleteMessage(config.storageDir, id);
+
+      if (!deleted) {
+        response.writeHead(404, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: "Message not found" }));
+        return;
+      }
+
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ deleted: true }));
+      return;
+    }
+  }
+
+  const emlMatch = pathname.match(/^\/messages\/([^/]+)\/eml$/);
+
+  if (emlMatch && method === "GET") {
+    const id = emlMatch[1];
+
+    if (!isValidMessageId(id)) {
+      response.writeHead(400, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: "Invalid message ID" }));
+      return;
+    }
+
+    const emlPath = path.join(config.storageDir, id, "message.eml");
+
+    try {
+      const eml = await fsPromises.readFile(emlPath);
+      response.writeHead(200, {
+        "Content-Type": "message/rfc822",
+        "Content-Disposition": `attachment; filename="${id}.eml"`
+      });
+      response.end(eml);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        response.writeHead(404, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: "Message not found" }));
+        return;
+      }
+
+      throw error;
+    }
+
+    return;
+  }
+
+  response.writeHead(404, { "Content-Type": "application/json" });
+  response.end(JSON.stringify({ error: "Not found" }));
+}
+
+const statusServer = http.createServer((request, response) => {
+  handleRequest(request, response).catch(error => {
+    state.lastError = formatError(error);
+    console.error("[HTTP] Unhandled error:", error);
+
+    if (!response.headersSent) {
+      response.writeHead(500, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: "Internal server error" }));
+    }
+  });
 });
 
 async function start() {
@@ -287,11 +456,26 @@ function shutdown(signal) {
   });
 }
 
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+if (require.main === module) {
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-start().catch(error => {
-  state.lastError = formatError(error);
-  console.error("[SYSTEM] Failed to start mailservice:", error);
-  process.exit(1);
-});
+  start().catch(error => {
+    state.lastError = formatError(error);
+    console.error("[SYSTEM] Failed to start mailservice:", error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  config,
+  state,
+  handleRequest,
+  listMessages,
+  getMessageMetadata,
+  deleteMessage,
+  sanitizeFilename,
+  normalizeAddressObject,
+  formatError,
+  toNumber
+};

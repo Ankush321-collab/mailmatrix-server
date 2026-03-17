@@ -8,18 +8,20 @@ A local SMTP mail catcher built with Node.js. Incoming emails are accepted over 
 - Stores each message in its own folder under `emails/`
 - Parses sender, recipients, subject, headers, text, HTML, and attachments
 - Saves attachments to disk
-- Exposes a simple health endpoint
+- REST API for listing, retrieving, and deleting stored messages
+- Exposes a health endpoint
 - Supports optional SMTP authentication with environment variables
 
 ## Scripts
 
 - `npm start` — start the service
 - `npm run dev` — start in watch mode
+- `npm test` — run the test suite
 
 ## Default ports
 
 - SMTP: `2525`
-- Health endpoint: `3000`
+- HTTP API / Health endpoint: `3000`
 
 Port `25` usually needs elevated privileges on Windows, so the service defaults to `2525`.
 
@@ -53,6 +55,60 @@ Each incoming message is written to:
 - `emails/<message-id>/message.eml`
 - `emails/<message-id>/message.json`
 - `emails/<message-id>/attachments/*`
+
+## REST API
+
+### Health
+
+| Method | Path      | Description                   |
+|--------|-----------|-------------------------------|
+| GET    | `/health` | Service status and metrics    |
+
+### Messages
+
+| Method | Path                    | Description                              |
+|--------|-------------------------|------------------------------------------|
+| GET    | `/messages`             | List all stored messages (summary view)  |
+| GET    | `/messages/:id`         | Get full metadata for a single message   |
+| GET    | `/messages/:id/eml`     | Download the raw `.eml` file             |
+| DELETE | `/messages/:id`         | Delete a stored message                  |
+
+#### `GET /messages`
+
+Returns an array of message summaries sorted newest first:
+
+```json
+{
+  "messages": [
+    {
+      "id": "2026-01-02T10-00-00-000Z-<uuid>",
+      "receivedAt": "2026-01-02T10:00:00.000Z",
+      "from": [{ "name": "Alice", "address": "alice@example.com" }],
+      "to": [{ "name": "Bob", "address": "bob@example.com" }],
+      "subject": "Hello",
+      "attachmentCount": 0
+    }
+  ]
+}
+```
+
+#### `GET /messages/:id`
+
+Returns the full parsed metadata stored in `message.json` for that message.
+
+#### `GET /messages/:id/eml`
+
+Responds with the raw RFC 822 message as a file download (`Content-Type: message/rfc822`).
+
+#### `DELETE /messages/:id`
+
+Removes the message directory (EML, JSON, and attachments) and returns:
+
+```json
+{ "deleted": true }
+```
+
+Returns `404` if the message does not exist.
 
 ## Example test settings
 
